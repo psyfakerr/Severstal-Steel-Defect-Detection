@@ -1,15 +1,9 @@
-import functools
-import torch.utils.model_zoo as model_zoo
-from torchvision.models.resnet import ResNet
-from torchvision.models.resnet import BasicBlock
-from torchvision.models.resnet import Bottleneck
-from pretrainedmodels.models.torchvision_models import pretrained_settings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from .encoders import get_encoder
+from encoders import get_encoder
 
 def preprocess_input(x, mean=None, std=None, input_space='RGB', input_range=None, **kwargs):
     if input_space == 'BGR':
@@ -187,6 +181,90 @@ class UnetDecoder(Model):
 
         return x
 
+class UnetPlusPlusDecoder(Model):
+
+    def __init__(
+            self,
+            encoder_channels,
+            decoder_channels=(256, 128, 64, 32, 16),
+            final_channels=1,
+            use_batchnorm=True,
+            center=False,
+            deepsupervision=False
+    ):
+        super().__init__()
+
+        if center:
+            channels = encoder_channels[0]
+            self.center = CenterBlock(channels, channels, use_batchnorm=use_batchnorm)
+        else:
+            self.center = None
+
+        in_channels, out_channels = decoder_channels
+
+        self.layer0_1 = DecoderBlock(in_channels[4] + in_channels[3], out_channels[4], use_batchnorm=use_batchnorm)
+
+        self.layer1_1 = DecoderBlock(in_channels[3] + in_channels[2], out_channels[3], use_batchnorm=use_batchnorm)
+        self.layer0_2 = DecoderBlock(in_channels[4] * 2 + in_channels[3], out_channels[4], use_batchnorm=use_batchnorm)
+
+        self.layer2_1 = DecoderBlock(in_channels[2] + in_channels[1], out_channels[2], use_batchnorm=use_batchnorm)
+        self.layer1_2 = DecoderBlock(in_channels[3] * 2 + in_channels[2], out_channels[3], use_batchnorm=use_batchnorm)
+        self.layer0_3 = DecoderBlock(in_channels[4] * 3 + in_channels[3], out_channels[4], use_batchnorm=use_batchnorm)
+
+        self.layer4_0 = DecoderBlock(in_channels[1], out_channels[0], use_batchnorm=use_batchnorm)
+        self.layer3_1 = DecoderBlock(in_channels[1] + in_channels[0], out_channels[1], use_batchnorm=use_batchnorm)
+        self.layer2_2 = DecoderBlock(in_channels[2] * 2 + in_channels[1], out_channels[2], use_batchnorm=use_batchnorm)
+        self.layer1_3 = DecoderBlock(in_channels[3] * 3 + in_channels[2], out_channels[3], use_batchnorm=use_batchnorm)
+        self.layer0_4 = DecoderBlock(in_channels[4] * 4 + in_channels[3], out_channels[4], use_batchnorm=use_batchnorm)
+
+        if deepsupervision:
+            self.final1 = nn.Conv2d(out_channels[4], final_channels, kernel_size=1)
+            self.final2 = nn.Conv2d(out_channels[4], final_channels, kernel_size=1)
+            self.final3 = nn.Conv2d(out_channels[4], final_channels, kernel_size=1)
+            self.final4 = nn.Conv2d(out_channels[4], final_channels, kernel_size=1)
+        else:
+            self.final = nn.Conv2d(out_channels[4], final_channels, kernel_size=1)
+
+        self.initialize()
+
+    def forward(self, x):
+        encoder_head = x[0]
+        skips = x[1:]
+
+        if self.center:
+            encoder_head = self.center(encoder_head)
+
+        x0_0 = skips[0]
+        x1_0 = skips[1]
+        x2_0 = skips[2]
+        x3_0 = skips[3]
+
+        x0_1 = self.layer0_1(torch.cat([x0_0, self.up(x1_0)], 1))
+
+        x1_1 = self.layer1_1(torch.cat([x1_0, self.up(x2_0)], 1))
+        x0_2 = self.layer0_2(torch.cat([x0_0, x0_1, self.up(x1_1)], 1))
+
+        x2_1 = self.layer2_1(torch.cat([x2_0, self.up(x3_0)], 1))
+        x1_2 = self.layer1_2(torch.cat([x1_0, x1_1, self.up(x2_1)], 1))
+        x0_3 = self.layer0_3(torch.cat([x0_0, x0_1, x0_2, self.up(x1_2)], 1))
+
+        x4_0 = self.layer4_0([encoder_head, skips[0]])
+        x3_1 = self.layer3_1(torch.cat([x3_0, self.up(x4_0)], 1))
+        x2_2 = self.layer2_2(torch.cat([x2_0, x2_1, self.up(x3_1)], 1))
+        x1_3 = self.layer1_3(torch.cat([x1_0, x1_1, x1_2, self.up(x2_2)], 1))
+        x0_4 = self.layer0_4(torch.cat([x0_0, x0_1, x0_2, x0_3, self.up(x1_3)], 1))
+
+        if self.args.deepsupervision:
+            output1 = self.final1(x0_1)
+            output2 = self.final2(x0_2)
+            output3 = self.final3(x0_3)
+            output4 = self.final4(x0_4)
+            return [output1, output2, output3, output4]
+
+        else:
+            output = self.final(x0_4)
+            return output
+
 class Unet(EncoderDecoder):
     """Unet_ is a fully convolution neural network for image semantic segmentation
 
@@ -235,4 +313,57 @@ class Unet(EncoderDecoder):
 
         super().__init__(encoder, decoder, activation)
 
+        self.name = 'u-{}'.format(encoder_name)
+
+
+class UnetPlusPlus(EncoderDecoder):
+    """Unet_ is a fully convolution neural network for image semantic segmentation
+       UNet++ is a fully convolution neural network for image semantic segmentation
+
+    Args:
+        encoder_name: name of classification model (without last dense layers) used as feature
+            extractor to build segmentation model.
+        encoder_weights: one of ``None`` (random initialization), ``imagenet`` (pre-training on ImageNet).
+        decoder_channels: list of numbers of ``Conv2D`` layer filters in decoder blocks
+        decoder_use_batchnorm: if ``True``, ``BatchNormalisation`` layer between ``Conv2D`` and ``Activation`` layers
+            is used.
+        classes: a number of classes for output (output shape - ``(batch, classes, h, w)``).
+        activation: activation function used in ``.predict(x)`` method for inference.
+            One of [``sigmoid``, ``softmax``, callable, None]
+        center: if ``True`` add ``Conv2dReLU`` block on encoder head (useful for VGG models)
+
+    Returns:
+        ``torch.nn.Module``: **UnetPlusPlus**
+
+    .. _Unet:
+        https://arxiv.org/abs/1807.10165
+
+    """
+
+    def __init__(
+            self,
+            encoder_name='resnet34',
+            encoder_weights='imagenet',
+            decoder_use_batchnorm=True,
+            decoder_channels=(256, 128, 64, 32, 16),
+            classes=1,
+            activation='sigmoid',
+            center=False,  # usefull for VGG models
+    ):
+        encoder = get_encoder(
+            encoder_name,
+            encoder_weights=encoder_weights
+        )
+
+        decoder = UnetDecoder(
+            encoder_channels=encoder.out_shapes,
+            decoder_channels=decoder_channels,
+            final_channels=classes,
+            use_batchnorm=decoder_use_batchnorm,
+            center=center,
+        )
+
+        super().__init__(encoder, decoder, activation)
+
+        self.name = 'u-{}'.format(encoder_name)
         self.name = 'u-{}'.format(encoder_name)
