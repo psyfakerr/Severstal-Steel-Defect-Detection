@@ -17,7 +17,14 @@ Segmentation:
 Warm restart scheduler with snapshots and SWA were used. 
 An Apex library and an accumulating gradients approach were used to had the ability to train deeper models. 
 
-As a result, I accomplished the competition in the top 12%. 
+As a result, I accomplished the competition in the top 16%. 
 I didn't have enough time for hyperparameters tuning, K-Fold and pseudo-labeling, also images cropping and good augumation weren't used.
 
-
+To improve the score you can try:
+  - use better augumation
+  - train deeper models or train longer
+  - tune thresholds
+  - use pseudo labeling
+  - add advanced head layers to your segmentation model
+  - train models on different image sizes
+  - train classifier as multiclassifier
